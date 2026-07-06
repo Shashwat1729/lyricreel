@@ -1,4 +1,4 @@
-# LifeAdmin MCP
+﻿# LifeAdmin MCP
 
 **Production-grade MCP server and REST API for visa/immigration document management. Supports any country, any visa type, any applicant profile.**
 
@@ -31,7 +31,7 @@ npm run dev
 
 | Landing Page | Theme Selection |
 |:---:|:---:|
-| ![Landing](screenshots/landing.png) | ![Themes](screenshots/themes.png) |
+| ![Landing](docs/landing.png) | ![Themes](docs/themes.png) |
 
 ## GitHub Pages
 
@@ -108,7 +108,7 @@ Set DEMO_MODE=true in .env to test without Instagram.
 
 | Landing Page | Theme Selection |
 |:---:|:---:|
-| ![Landing](screenshots/landing.png) | ![Themes](screenshots/themes.png) |
+| ![Landing](docs/landing.png) | ![Themes](docs/themes.png) |
 
 ## GitHub Pages
 
@@ -175,7 +175,7 @@ Set DEMO_MODE=true in .env to test without Instagram.
 
 | Landing Page | Theme Selection |
 |:---:|:---:|
-| ![Landing](screenshots/landing.png) | ![Themes](screenshots/themes.png) |
+| ![Landing](docs/landing.png) | ![Themes](docs/themes.png) |
 
 ## GitHub Pages
 
@@ -236,7 +236,7 @@ Backend: **http://localhost:3001**
 
 | Landing Page | Theme Selection |
 |:---:|:---:|
-| ![Landing](screenshots/landing.png) | ![Themes](screenshots/themes.png) |
+| ![Landing](docs/landing.png) | ![Themes](docs/themes.png) |
 
 ## GitHub Pages
 
