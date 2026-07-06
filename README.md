@@ -1,20 +1,20 @@
-# 🎵 AI Lyric Video Generator
+﻿# ðŸŽµ LyricReel
 
-Generate stunning lyric videos for YouTube Shorts, Instagram Reels, and TikTok — powered by AI.
+Generate stunning lyric videos for YouTube Shorts, Instagram Reels, and TikTok â€” powered by AI.
 
-Upload a song → AI transcribes lyrics with word-level timestamps → Remotion renders a cinematic vertical video with synced karaoke-style animation.
+Upload a song â†’ AI transcribes lyrics with word-level timestamps â†’ Remotion renders a cinematic vertical video with synced karaoke-style animation.
 
-## ✨ Features
+## âœ¨ Features
 
-- **Automatic Transcription** — WhisperX generates word-level timestamps locally
-- **Karaoke-style Animation** — Words highlight exactly when sung
-- **6 Visual Themes** — Neon, Anime, Sad, Synthwave, Minimalist, Cinematic
-- **Vertical Video** — 1080×1920, optimized for Shorts/Reels/TikTok
-- **No Paid APIs** — Everything runs locally with open-source tools
-- **Preview Player** — See lyrics synced to audio before rendering
-- **Multiple Formats** — MP3, WAV input; MP4 H.264 output
+- **Automatic Transcription** â€” WhisperX generates word-level timestamps locally
+- **Karaoke-style Animation** â€” Words highlight exactly when sung
+- **6 Visual Themes** â€” Neon, Anime, Sad, Synthwave, Minimalist, Cinematic
+- **Vertical Video** â€” 1080Ã—1920, optimized for Shorts/Reels/TikTok
+- **No Paid APIs** â€” Everything runs locally with open-source tools
+- **Preview Player** â€” See lyrics synced to audio before rendering
+- **Multiple Formats** â€” MP3, WAV input; MP4 H.264 output
 
-## 🚀 Quick Start
+## ðŸš€ Quick Start
 
 ### Prerequisites
 
@@ -44,7 +44,7 @@ Frontend runs on `http://localhost:3000`, backend on `http://localhost:3001`.
 docker-compose up
 ```
 
-## 📦 Installation Details
+## ðŸ“¦ Installation Details
 
 ### FFmpeg
 
@@ -80,31 +80,31 @@ pip install whisperx torch torchaudio --index-url https://download.pytorch.org/w
 | GPU | None (CPU fallback) | NVIDIA with CUDA |
 | Disk | 2 GB free | 5 GB free |
 
-## 🏗️ Architecture
+## ðŸ—ï¸ Architecture
 
 ```
-├── frontend/          # Next.js 14 + TailwindCSS
-├── backend/           # Express.js API + WhisperX integration
-├── remotion/          # Remotion video compositions
-├── uploads/           # Uploaded audio files
-├── renders/           # Generated MP4 videos
-├── temp/              # Temporary processing files
-├── scripts/           # Setup and utility scripts
-└── docker-compose.yml # Docker deployment
+â”œâ”€â”€ frontend/          # Next.js 14 + TailwindCSS
+â”œâ”€â”€ backend/           # Express.js API + WhisperX integration
+â”œâ”€â”€ remotion/          # Remotion video compositions
+â”œâ”€â”€ uploads/           # Uploaded audio files
+â”œâ”€â”€ renders/           # Generated MP4 videos
+â”œâ”€â”€ temp/              # Temporary processing files
+â”œâ”€â”€ scripts/           # Setup and utility scripts
+â””â”€â”€ docker-compose.yml # Docker deployment
 ```
 
-## 🎨 Themes
+## ðŸŽ¨ Themes
 
 | Theme | Style |
 |-------|-------|
-| 🟢 Neon | Dark background, cyan/magenta glow |
-| 🌸 Anime | Deep purple, pink accents |
-| 🌧️ Sad | Dark blue/grey, muted tones |
-| 🌆 Synthwave | Purple/orange gradient, retro grid |
-| ⬜ Minimalist | Pure black, white text |
-| 🎬 Cinematic | Letterbox bars, golden highlights |
+| ðŸŸ¢ Neon | Dark background, cyan/magenta glow |
+| ðŸŒ¸ Anime | Deep purple, pink accents |
+| ðŸŒ§ï¸ Sad | Dark blue/grey, muted tones |
+| ðŸŒ† Synthwave | Purple/orange gradient, retro grid |
+| â¬œ Minimalist | Pure black, white text |
+| ðŸŽ¬ Cinematic | Letterbox bars, golden highlights |
 
-## 📡 API Endpoints
+## ðŸ“¡ API Endpoints
 
 | Method | Endpoint | Description |
 |--------|----------|-------------|
@@ -114,7 +114,7 @@ pip install whisperx torch torchaudio --index-url https://download.pytorch.org/w
 | GET | `/status/:id` | Check job status |
 | GET | `/video/:id` | Download rendered video |
 
-## 🛠️ Development
+## ðŸ› ï¸ Development
 
 ```bash
 # Frontend only
@@ -130,7 +130,7 @@ npm run dev:remotion
 npm run dev
 ```
 
-## 📄 Environment Variables
+## ðŸ“„ Environment Variables
 
 Copy `.env.example` to `.env` and configure:
 
@@ -141,6 +141,7 @@ Copy `.env.example` to `.env` and configure:
 | WHISPERX_DEVICE | cpu | cpu or cuda |
 | FFMPEG_PATH | ffmpeg | Path to FFmpeg binary |
 
-## 📝 License
+## ðŸ“ License
 
 MIT
+
