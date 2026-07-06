@@ -31,4 +31,4 @@ Frontend on **:3000**, Backend on **:3001**.
 
 ## Themes
 
-Neon · Anime · Sad · Synthwave · Minimalist · Cinematic
+Neon . Anime . Sad . Synthwave . Minimalist . Cinematic
