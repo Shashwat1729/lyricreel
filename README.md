@@ -26,6 +26,19 @@ npx prisma migrate deploy
 npm run dev
 `
 
+
+## Screenshots
+
+| Landing Page | Theme Selection |
+|:---:|:---:|
+| ![Landing](screenshots/landing.png) | ![Themes](screenshots/themes.png) |
+
+## GitHub Pages
+
+A live demo is available at: **https://shashwat1729.github.io/lyricreel/**
+
+> Note: The backend API is not available on GitHub Pages, so the upload and render features require running locally.
+
 ## Environment Variables
 
 | Variable | Required | Default | Description |
@@ -90,6 +103,19 @@ python run.py
 
 Set DEMO_MODE=true in .env to test without Instagram.
 
+
+## Screenshots
+
+| Landing Page | Theme Selection |
+|:---:|:---:|
+| ![Landing](screenshots/landing.png) | ![Themes](screenshots/themes.png) |
+
+## GitHub Pages
+
+A live demo is available at: **https://shashwat1729.github.io/lyricreel/**
+
+> Note: The backend API is not available on GitHub Pages, so the upload and render features require running locally.
+
 ## Environment Variables
 
 Copy ackend/.env.example to ackend/.env:
@@ -144,6 +170,19 @@ python run.py
 
 Set DEMO_MODE=true in .env to test without Instagram.
 
+
+## Screenshots
+
+| Landing Page | Theme Selection |
+|:---:|:---:|
+| ![Landing](screenshots/landing.png) | ![Themes](screenshots/themes.png) |
+
+## GitHub Pages
+
+A live demo is available at: **https://shashwat1729.github.io/lyricreel/**
+
+> Note: The backend API is not available on GitHub Pages, so the upload and render features require running locally.
+
 ## Environment Variables
 
 Copy ackend/.env.example to ackend/.env:
@@ -191,6 +230,19 @@ npm run dev
 
 Frontend: **http://localhost:3000**
 Backend: **http://localhost:3001**
+
+
+## Screenshots
+
+| Landing Page | Theme Selection |
+|:---:|:---:|
+| ![Landing](screenshots/landing.png) | ![Themes](screenshots/themes.png) |
+
+## GitHub Pages
+
+A live demo is available at: **https://shashwat1729.github.io/lyricreel/**
+
+> Note: The backend API is not available on GitHub Pages, so the upload and render features require running locally.
 
 ## Environment Variables
 

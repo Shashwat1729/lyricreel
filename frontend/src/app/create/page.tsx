@@ -1099,3 +1099,5 @@ function CreatePage() {
 export default function CreatePageWrapped() {
   return <ErrorBoundary><CreatePage /></ErrorBoundary>;
 }
+
+export function generateStaticParams() { return []; }
