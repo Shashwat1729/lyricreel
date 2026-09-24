@@ -1,142 +1,146 @@
-import axios from 'axios';
+import type { AudioQuality, Job, ThemeName, UploadResult, WordTimestamp, YouTubeInfo } from '@/types';
 
-const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:5001';
+export const API_URL = (process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3001').replace(/\/+$/, '');
 
-const api = axios.create({ baseURL: API_URL });
+export class ApiError extends Error {
+  constructor(message: string, readonly status: number) {
+    super(message);
+  }
+}
 
-export async function uploadSong(file: File) {
-  const formData = new FormData();
-  formData.append('audio', file);
-  const { data } = await api.post('/upload-song', formData, {
-    headers: { 'Content-Type': 'multipart/form-data' },
+async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
+  let res: Response;
+  try {
+    res = await fetch(`${API_URL}${path}`, init);
+  } catch (err) {
+    if ((err as Error).name === 'AbortError') throw err;
+    throw new ApiError(`Can't reach the LyricReel server at ${API_URL}. Is the backend running?`, 0);
+  }
+  const text = await res.text();
+  let body: unknown = null;
+  try { body = text ? JSON.parse(text) : null; } catch { /* not JSON */ }
+  if (!res.ok) {
+    const message = (body as { error?: string } | null)?.error || `Request failed (${res.status})`;
+    throw new ApiError(message, res.status);
+  }
+  return body as T;
+}
+
+function postJson<T>(path: string, data: unknown, signal?: AbortSignal): Promise<T> {
+  return request<T>(path, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(data),
+    signal,
   });
-  return data;
 }
 
-export async function generateTranscript(filename: string, title?: string, artist?: string) {
-  const { data } = await api.post('/generate-transcript', { filename, title, artist });
-  return data;
-}
-
-export async function searchLyrics(title: string, artist?: string) {
-  const { data } = await api.post('/generate-transcript/search-lyrics', { title, artist });
-  return data;
-}
-
-export async function getTranscriptStatus(jobId: string) {
-  const { data } = await api.get(`/generate-transcript/status/${jobId}`);
-  return data;
-}
-
-export async function downloadFromYouTube(url: string, quality: string = '192') {
-  const { data } = await api.post('/youtube-download', { url, quality });
-  return data;
-}
-
-export async function getYouTubeStatus(jobId: string) {
-  const { data } = await api.get(`/youtube-download/status/${jobId}`);
-  return data;
-}
-
-export async function generateVideo(filename: string, words: { word: string; start: number; end: number }[], theme: string) {
-  const { data } = await api.post('/generate-video/generate', { filename, words, theme });
-  return data;
-}
-
-export async function getVideoStatus(jobId: string) {
-  const { data } = await api.get(`/generate-video/status/${jobId}`);
-  return data;
-}
-
-/**
- * Subscribe to real-time job progress via SSE (Server-Sent Events).
- * Falls back to polling if SSE connection fails.
- */
-export function subscribeToJob(
-  jobId: string,
-  onProgress: (data: { status: string; progress: number; error?: string }) => void,
-  onComplete: (data: any) => void,
-  onError: (err: Error) => void,
-): () => void {
-  const eventSource = new EventSource(`${API_URL}/events/${jobId}`);
-  let closed = false;
-
-  eventSource.onmessage = (event) => {
-    if (closed) return;
-    try {
-      const data = JSON.parse(event.data);
-      if (data.error && !data.status) {
-        // Job not found
-        eventSource.close();
-        onError(new Error(data.error));
-        return;
-      }
-      onProgress(data);
-      if (data.status === 'complete') {
-        eventSource.close();
-        onComplete(data);
-      } else if (data.status === 'error') {
-        eventSource.close();
-        onError(new Error(data.error || 'Job failed'));
-      }
-    } catch {
-      // Ignore parse errors
-    }
-  };
-
-  eventSource.onerror = () => {
-    if (closed) return;
-    eventSource.close();
-    // Fallback to polling
-    pollStatus(jobId, getVideoStatus, (p) => onProgress({ status: 'rendering', progress: p }))
-      .then(onComplete)
-      .catch(onError);
-  };
-
-  return () => {
-    closed = true;
-    eventSource.close();
-  };
-}
-
-/**
- * Poll-based status checking (fallback for SSE).
- */
-export async function pollStatus(
-  jobId: string,
-  statusFn: (id: string) => Promise<any>,
-  onProgress?: (p: number) => void,
-  interval = 1500,
-  signal?: AbortSignal
-): Promise<any> {
+/** Upload with progress reporting (fetch has no upload progress, so this uses XHR). */
+export function uploadSong(file: File, onProgress?: (pct: number) => void, signal?: AbortSignal): Promise<UploadResult> {
   return new Promise((resolve, reject) => {
-    const MAX_TIMEOUT = 10 * 60 * 1000; // 10 minute timeout
-    const startTime = Date.now();
-
-    const poll = setInterval(async () => {
-      if (signal?.aborted) { clearInterval(poll); reject(new Error('Cancelled')); return; }
-      if (Date.now() - startTime > MAX_TIMEOUT) {
-        clearInterval(poll);
-        reject(new Error('Operation timed out'));
-        return;
-      }
-      try {
-        const status = await statusFn(jobId);
-        if (onProgress) onProgress(status.progress || 0);
-
-        if (status.status === 'complete') {
-          clearInterval(poll);
-          resolve(status);
-        } else if (status.status === 'error') {
-          clearInterval(poll);
-          reject(new Error(status.error || 'Job failed'));
-        }
-      } catch (err) {
-        clearInterval(poll);
-        reject(err);
-      }
-    }, interval);
-
-    signal?.addEventListener('abort', () => { clearInterval(poll); reject(new Error('Cancelled')); });
+    const xhr = new XMLHttpRequest();
+    const form = new FormData();
+    form.append('audio', file);
+    xhr.open('POST', `${API_URL}/upload-song`);
+    xhr.upload.onprogress = (e) => { if (e.lengthComputable) onProgress?.(Math.round((e.loaded / e.total) * 100)); };
+    xhr.onload = () => {
+      let body: { error?: string } & Partial<UploadResult> = {};
+      try { body = JSON.parse(xhr.responseText); } catch { /* ignore */ }
+      if (xhr.status >= 200 && xhr.status < 300) resolve(body as UploadResult);
+      else reject(new ApiError(body.error || `Upload failed (${xhr.status})`, xhr.status));
+    };
+    xhr.onerror = () => reject(new ApiError(`Can't reach the LyricReel server at ${API_URL}. Is the backend running?`, 0));
+    xhr.onabort = () => reject(new DOMException('Aborted', 'AbortError'));
+    signal?.addEventListener('abort', () => xhr.abort());
+    xhr.send(form);
   });
+}
+
+export function getYouTubeInfo(url: string, signal?: AbortSignal) {
+  return postJson<YouTubeInfo>('/youtube-download/info', { url }, signal);
+}
+
+export function startYouTubeDownload(url: string, quality: AudioQuality) {
+  return postJson<{ jobId: string; videoId: string }>('/youtube-download', { url, quality });
+}
+
+export function startTranscription(filename: string, title?: string, artist?: string, duration?: number) {
+  return postJson<{ jobId: string }>('/generate-transcript', { filename, title, artist, duration });
+}
+
+export interface RenderRequest {
+  filename: string;
+  words: WordTimestamp[];
+  theme: ThemeName;
+  title?: string;
+  artist?: string;
+  offset?: number;
+  clipStart?: number;
+  clipEnd?: number;
+}
+
+export function startRender(req: RenderRequest) {
+  return postJson<{ jobId: string; duration: number }>('/generate-video/generate', req);
+}
+
+export function getJob(jobId: string, signal?: AbortSignal) {
+  return request<Job>(`/jobs/${jobId}`, { signal });
+}
+
+export function cancelJob(jobId: string) {
+  return request<{ cancelled: boolean }>(`/jobs/${jobId}`, { method: 'DELETE' }).catch(() => ({ cancelled: false }));
+}
+
+export function audioUrl(filename: string) {
+  return `${API_URL}/uploads/${encodeURIComponent(filename)}`;
+}
+
+export function videoUrl(videoId: string) {
+  return `${API_URL}/video/${videoId}`;
+}
+
+export function downloadUrl(videoId: string, name?: string) {
+  const q = new URLSearchParams({ download: '1' });
+  if (name) q.set('name', name);
+  return `${API_URL}/video/${videoId}?${q}`;
+}
+
+const sleep = (ms: number, signal?: AbortSignal) =>
+  new Promise<void>((resolve, reject) => {
+    const t = setTimeout(resolve, ms);
+    signal?.addEventListener('abort', () => { clearTimeout(t); reject(new DOMException('Aborted', 'AbortError')); }, { once: true });
+  });
+
+/**
+ * Poll a job until it finishes. Tolerates brief network blips; rejects with the job's error
+ * message on failure and with an AbortError when `signal` is aborted.
+ */
+export async function waitForJob(jobId: string, onUpdate: (job: Job) => void, signal?: AbortSignal): Promise<Job> {
+  let failures = 0;
+  let delay = 700;
+  for (;;) {
+    if (signal?.aborted) throw new DOMException('Aborted', 'AbortError');
+    try {
+      const job = await getJob(jobId, signal);
+      failures = 0;
+      onUpdate(job);
+      if (job.status === 'complete') return job;
+      if (job.status === 'error') throw new ApiError(job.error || 'Something went wrong', 500);
+      if (job.status === 'cancelled') throw new DOMException('Cancelled', 'AbortError');
+    } catch (err) {
+      if (err instanceof DOMException || (err as Error).name === 'AbortError') throw err;
+      if (err instanceof ApiError && err.status !== 0) throw err;
+      if (++failures >= 5) throw err;
+    }
+    await sleep(delay, signal);
+    delay = Math.min(2000, delay + 150);
+  }
+}
+
+export function isAbort(err: unknown): boolean {
+  return (err as Error)?.name === 'AbortError';
+}
+
+export function errorText(err: unknown, fallback = 'Something went wrong'): string {
+  return err instanceof Error && err.message ? err.message : fallback;
 }

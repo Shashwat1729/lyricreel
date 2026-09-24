@@ -16,13 +16,19 @@ export interface ThemeConfig {
   dimmedColor: string;
   fontFamily: string;
   fontSize: number;
+  fontWeight: number;
+  uppercase?: boolean;
   particleColor: string;
 }
 
-export interface LyricVideoProps {
+// `type` (not interface) so it satisfies Remotion's Record<string, unknown> props constraint
+export type LyricVideoProps = {
   audioSrc: string;
   words: WordTimestamp[];
   theme: ThemeName;
-  backgroundUrl?: string | null;
+  title?: string | null;
+  artist?: string | null;
+  /** Seconds into the song where the video starts */
+  clipStart?: number;
   durationInSeconds: number;
-}
+};

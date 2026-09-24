@@ -1,31 +1,31 @@
-version: '3.8'
-
 services:
   backend:
     build:
-      context: ./backend
-      dockerfile: Dockerfile
+      context: .
+      dockerfile: backend/Dockerfile
+      args:
+        # Set to "true" to bundle WhisperX (large download, enables transcription of any song)
+        INSTALL_WHISPERX: "false"
     ports:
       - "3001:3001"
     volumes:
-      - ./uploads:/app/uploads
-      - ./renders:/app/renders
-      - ./temp:/app/temp
+      - lyricreel-data:/app/data
     environment:
-      - PORT=3001
-      - UPLOAD_DIR=/app/uploads
-      - RENDER_DIR=/app/renders
-      - TEMP_DIR=/app/temp
+      - CORS_ORIGINS=http://localhost:3000
       - WHISPERX_MODEL_SIZE=base
       - WHISPERX_DEVICE=cpu
+    restart: unless-stopped
 
   frontend:
     build:
       context: ./frontend
-      dockerfile: Dockerfile
+      args:
+        NEXT_PUBLIC_API_URL: http://localhost:3001
     ports:
       - "3000:3000"
-    environment:
-      - NEXT_PUBLIC_API_URL=http://localhost:3001
     depends_on:
       - backend
+    restart: unless-stopped
+
+volumes:
+  lyricreel-data:

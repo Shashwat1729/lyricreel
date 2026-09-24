@@ -1,69 +1,32 @@
 import type { Metadata, Viewport } from 'next';
-import { Inter } from 'next/font/google';
+import { Bricolage_Grotesque, DM_Sans, JetBrains_Mono } from 'next/font/google';
 import './globals.css';
 
-const inter = Inter({
-  subsets: ['latin'],
-  display: 'swap',
-  variable: '--font-inter',
-  weight: ['400', '500', '600', '700', '800', '900'],
-});
+const display = Bricolage_Grotesque({ subsets: ['latin'], weight: ['500', '700', '800'], variable: '--font-display', display: 'swap' });
+const sans = DM_Sans({ subsets: ['latin'], weight: ['400', '500', '600', '700'], variable: '--font-sans', display: 'swap' });
+const mono = JetBrains_Mono({ subsets: ['latin'], weight: ['500'], variable: '--font-mono', display: 'swap' });
 
 export const metadata: Metadata = {
-  title: 'LyricFlow — Lyric Video Generator',
-  description: 'Create stunning lyric videos in seconds. Paste a YouTube link or upload any song. Get word-level synced lyrics and beautiful karaoke videos ready for Shorts, Reels & TikTok.',
-  keywords: ['lyric video', 'karaoke', 'youtube shorts', 'tiktok', 'reels', 'music video', 'transcription'],
-  authors: [{ name: 'LyricFlow' }],
+  title: { default: 'LyricReel · Lyric videos for Shorts, Reels & TikTok', template: '%s · LyricReel' },
+  description: 'Paste a YouTube link or upload a song. LyricReel finds the lyrics, syncs every word and renders a vertical 1080×1920 lyric video. Runs locally, no API keys.',
+  applicationName: 'LyricReel',
   openGraph: {
-    title: 'LyricFlow — Lyric Video Generator',
-    description: 'Create stunning lyric videos in seconds. Word-level synced lyrics for Shorts, Reels & TikTok.',
+    title: 'LyricReel',
+    description: 'Turn any song into a synced lyric video for Shorts, Reels and TikTok.',
     type: 'website',
-    locale: 'en_US',
-  },
-  twitter: {
-    card: 'summary_large_image',
-    title: 'LyricFlow — Lyric Video Generator',
-    description: 'Create stunning lyric videos in seconds. Word-level synced lyrics for Shorts, Reels & TikTok.',
-  },
-  robots: {
-    index: true,
-    follow: true,
   },
 };
 
 export const viewport: Viewport = {
-  themeColor: '#050508',
+  themeColor: '#0C0C11',
   width: 'device-width',
   initialScale: 1,
-  maximumScale: 5,
 };
 
-export default function RootLayout({
-  children,
-}: {
-  children: React.ReactNode;
-}) {
+export default function RootLayout({ children }: { children: React.ReactNode }) {
   return (
-    <html lang="en" className={`dark ${inter.variable}`} suppressHydrationWarning>
-      <head>
-        <link rel="icon" href="/favicon.ico" sizes="any" />
-        <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
-      </head>
-      <body className={`${inter.className} min-h-screen bg-bg-primary text-white antialiased selection:bg-accent selection:text-black`}>
-        {/* Background effects */}
-        <div className="fixed inset-0 bg-bg-primary -z-50" />
-        <div className="fixed inset-0 bg-dot-pattern opacity-30 -z-40" />
-        <div className="fixed inset-0 bg-radial-overlay -z-30" />
-        
-        {/* Animated orbs for atmosphere */}
-        <div className="fixed top-0 left-1/4 w-[600px] h-[600px] rounded-full bg-neon-purple/20 blur-[150px] -z-20 animate-pulse-slow" />
-        <div className="fixed bottom-0 right-1/4 w-[500px] h-[500px] rounded-full bg-accent/10 blur-[120px] -z-20 animate-pulse-slow" style={{ animationDelay: '2s' }} />
-        
-        {/* Main content */}
-        <div className="relative z-0">
-          {children}
-        </div>
-      </body>
+    <html lang="en" className={`${display.variable} ${sans.variable} ${mono.variable}`}>
+      <body>{children}</body>
     </html>
   );
 }

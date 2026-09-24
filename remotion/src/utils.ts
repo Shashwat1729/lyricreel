@@ -6,72 +6,49 @@ export interface LyricLine {
   end: number;
 }
 
-/**
- * Group words into display lines (~5-7 words, or break at pauses > 0.5s)
- */
-export function groupWordsIntoLines(words: WordTimestamp[], maxWordsPerLine = 6): LyricLine[] {
-  if (words.length === 0) return [];
+const PHRASE_END = /[.!?,;:]["')\]]?$/;
 
+/**
+ * Group words into display lines: break on pauses, punctuation, or when a line gets long.
+ */
+export function groupWordsIntoLines(words: WordTimestamp[], maxWordsPerLine = 6, maxChars = 28): LyricLine[] {
   const lines: LyricLine[] = [];
-  let currentLine: WordTimestamp[] = [];
+  let current: WordTimestamp[] = [];
+  let chars = 0;
+
+  const flush = () => {
+    if (!current.length) return;
+    lines.push({ words: current, start: current[0].start, end: current[current.length - 1].end });
+    current = [];
+    chars = 0;
+  };
 
   for (let i = 0; i < words.length; i++) {
-    currentLine.push(words[i]);
+    const w = words[i];
+    if (current.length && chars + w.word.length + 1 > maxChars) flush();
+    current.push(w);
+    chars += w.word.length + 1;
 
-    const isLastWord = i === words.length - 1;
-    const nextWord = words[i + 1];
-    const gap = nextWord ? nextWord.start - words[i].end : 0;
-    const lineFull = currentLine.length >= maxWordsPerLine;
-    const naturalBreak = gap > 0.5;
-
-    if (isLastWord || lineFull || naturalBreak) {
-      lines.push({
-        words: [...currentLine],
-        start: currentLine[0].start,
-        end: currentLine[currentLine.length - 1].end,
-      });
-      currentLine = [];
-    }
+    const next = words[i + 1];
+    const gap = next ? next.start - w.end : 0;
+    if (!next || current.length >= maxWordsPerLine || gap > 0.6 || (PHRASE_END.test(w.word) && current.length >= 3)) flush();
   }
-
+  flush();
   return lines;
 }
 
-/**
- * Get the active line index at a given time
- */
-export function getActiveLineIndex(lines: LyricLine[], timeInSeconds: number): number {
-  for (let i = lines.length - 1; i >= 0; i--) {
-    if (timeInSeconds >= lines[i].start - 0.1) return i;
+/** Index of the line being sung (or most recently sung) at `time`; -1 before the first line. */
+export function getActiveLineIndex(lines: LyricLine[], time: number): number {
+  let lo = 0;
+  let hi = lines.length - 1;
+  let found = -1;
+  while (lo <= hi) {
+    const mid = (lo + hi) >> 1;
+    if (lines[mid].start - 0.15 <= time) { found = mid; lo = mid + 1; } else hi = mid - 1;
   }
-  return 0;
+  return found;
 }
 
-/**
- * Check if a word is currently active
- */
-export function isWordActive(word: WordTimestamp, timeInSeconds: number): boolean {
-  return timeInSeconds >= word.start && timeInSeconds <= word.end;
-}
-
-/**
- * Check if word has been spoken (past)
- */
-export function isWordPast(word: WordTimestamp, timeInSeconds: number): boolean {
-  return timeInSeconds > word.end;
-}
-
-/**
- * Interpolate value for smooth animations
- */
-export function interpolate(
-  value: number,
-  inputRange: [number, number],
-  outputRange: [number, number]
-): number {
-  const [inMin, inMax] = inputRange;
-  const [outMin, outMax] = outputRange;
-  const clamped = Math.min(Math.max(value, inMin), inMax);
-  const progress = (clamped - inMin) / (inMax - inMin);
-  return outMin + progress * (outMax - outMin);
+export function clamp(value: number, min: number, max: number): number {
+  return Math.min(max, Math.max(min, value));
 }

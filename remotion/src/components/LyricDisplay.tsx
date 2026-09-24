@@ -1,141 +1,120 @@
 import React, { useMemo } from 'react';
-import { AbsoluteFill, interpolate as remotionInterpolate, spring, useCurrentFrame, useVideoConfig } from 'remotion';
+import { AbsoluteFill, interpolate, spring, useCurrentFrame, useVideoConfig } from 'remotion';
 import { ThemeConfig, WordTimestamp } from '../types';
-import { groupWordsIntoLines, getActiveLineIndex, LyricLine } from '../utils';
+import { clamp, getActiveLineIndex, groupWordsIntoLines } from '../utils';
 
 interface Props {
   words: WordTimestamp[];
   currentTime: number;
+  clipStart: number;
   theme: ThemeConfig;
 }
 
-export const LyricDisplay: React.FC<Props> = ({ words, currentTime, theme }) => {
+/** How long a line lingers after it ends before fading out during an instrumental gap */
+const LINGER = 2.5;
+
+export const LyricDisplay: React.FC<Props> = ({ words, currentTime, clipStart, theme }) => {
   const frame = useCurrentFrame();
   const { fps } = useVideoConfig();
   const lines = useMemo(() => groupWordsIntoLines(words), [words]);
-  const activeLineIdx = getActiveLineIndex(lines, currentTime);
 
-  // Show current line and surrounding
-  const visibleLines = lines.slice(
-    Math.max(0, activeLineIdx - 1),
-    activeLineIdx + 2
-  );
+  let activeIdx = getActiveLineIndex(lines, currentTime);
+  const next = lines[activeIdx + 1];
+
+  // Before the first line: preview it shortly before it starts
+  if (activeIdx === -1) {
+    if (!lines.length || lines[0].start - currentTime > 1.5) return null;
+    activeIdx = 0;
+  }
+
+  const active = lines[activeIdx];
+  // During long gaps, fade the finished line out and fade the next one in
+  const sinceEnd = currentTime - active.end;
+  const untilNext = next ? next.start - currentTime : Infinity;
+  const gapFade = sinceEnd > LINGER && untilNext > 1 ? clamp(1 - (sinceEnd - LINGER) / 0.6, 0, 1) : 1;
+  if (gapFade === 0) return null;
+
+  const lineIntro = spring({
+    frame: frame - Math.round((active.start - clipStart) * fps),
+    fps,
+    config: { damping: 18, stiffness: 120, mass: 0.6 },
+  });
+
+  const visible = [activeIdx - 1, activeIdx, activeIdx + 1].filter((i) => i >= 0 && i < lines.length);
 
   return (
     <AbsoluteFill
       style={{
-        display: 'flex',
-        flexDirection: 'column',
         justifyContent: 'center',
         alignItems: 'center',
-        padding: '0 60px',
+        flexDirection: 'column',
+        padding: '0 80px',
+        gap: 36,
+        opacity: gapFade,
+        transform: `translateY(${interpolate(lineIntro, [0, 1], [40, 0])}px)`,
       }}
     >
-      {visibleLines.map((line, lineIdx) => {
-        const globalIdx = Math.max(0, activeLineIdx - 1) + lineIdx;
-        const isActiveLine = globalIdx === activeLineIdx;
-        const isPastLine = globalIdx < activeLineIdx;
-
-        // Animate line entrance using spring
-        const lineEntryFrame = Math.round(line.start * fps);
-        const lineProgress = spring({
-          frame: frame - lineEntryFrame,
-          fps,
-          config: { damping: 20, stiffness: 100, mass: 0.5 },
-        });
-
-        const lineOpacity = isActiveLine ? 1 : isPastLine ? 0.3 : 0.5 * lineProgress;
-        const lineTranslateY = isActiveLine ? 0 : isPastLine ? -10 : remotionInterpolate(lineProgress, [0, 1], [20, 0]);
+      {visible.map((lineIdx) => {
+        const line = lines[lineIdx];
+        const role = lineIdx === activeIdx ? 'active' : lineIdx < activeIdx ? 'past' : 'next';
+        const size = role === 'active' ? theme.fontSize : Math.round(theme.fontSize * 0.72);
 
         return (
           <div
-            key={globalIdx}
+            key={lineIdx}
             style={{
               display: 'flex',
               flexWrap: 'wrap',
               justifyContent: 'center',
-              gap: '12px',
-              marginBottom: '40px',
-              opacity: lineOpacity,
-              transform: `translateY(${lineTranslateY}px)`,
+              columnGap: size * 0.34,
+              rowGap: 4,
+              maxWidth: '100%',
+              opacity: role === 'active' ? 1 : role === 'past' ? 0.28 : 0.45 * lineIntro,
+              textAlign: 'center',
             }}
           >
             {line.words.map((word, wordIdx) => {
-              const wordStartFrame = Math.round(word.start * fps);
-              const wordEndFrame = Math.round(word.end * fps);
+              const text = theme.uppercase ? word.word.toUpperCase() : word.word;
+              const base: React.CSSProperties = {
+                fontFamily: theme.fontFamily,
+                fontSize: size,
+                fontWeight: theme.fontWeight,
+                lineHeight: 1.2,
+                display: 'inline-block',
+                whiteSpace: 'nowrap',
+              };
 
-              // Is word currently being spoken?
-              const active = frame >= wordStartFrame && frame <= wordEndFrame;
-              // Has word been spoken?
-              const past = frame > wordEndFrame;
-              const future = !active && !past;
+              if (role !== 'active') {
+                return <span key={wordIdx} style={{ ...base, color: theme.textColor }}>{text}</span>;
+              }
 
-              // Smooth scale animation using spring when word becomes active
-              const scaleSpring = active
-                ? spring({
-                    frame: frame - wordStartFrame,
-                    fps,
-                    config: { damping: 12, stiffness: 200, mass: 0.3 },
-                  })
-                : past
-                ? 1
+              const duration = Math.max(0.05, word.end - word.start);
+              const fill = clamp((currentTime - word.start) / duration, 0, 1);
+              const singing = currentTime >= word.start && currentTime <= word.end + 0.08;
+              const pop = singing
+                ? spring({ frame: frame - Math.round((word.start - clipStart) * fps), fps, config: { damping: 12, stiffness: 220, mass: 0.35 } })
                 : 0;
+              const scale = singing ? interpolate(pop, [0, 1], [1, 1.08]) : 1;
 
-              const scale = remotionInterpolate(
-                active ? scaleSpring : 1,
-                [0, 1],
-                [1.0, 1.15]
-              );
+              if (fill <= 0) {
+                return <span key={wordIdx} style={{ ...base, color: theme.dimmedColor }}>{text}</span>;
+              }
 
-              // Glow intensity animation
-              const glowIntensity = active
-                ? remotionInterpolate(
-                    Math.sin((frame - wordStartFrame) * 0.3),
-                    [-1, 1],
-                    [0.6, 1.0]
-                  )
-                : 0;
-
-              const color = active
-                ? theme.accentColor
-                : past
-                ? theme.dimmedColor
-                : theme.textColor;
-
-              const textShadow = active
-                ? `0 0 ${20 * glowIntensity}px ${theme.glowColor}, 0 0 ${40 * glowIntensity}px ${theme.glowColor}80`
-                : 'none';
-
-              // Word entrance opacity (fade in when line appears)
-              const entranceProgress = spring({
-                frame: frame - wordStartFrame + fps * 0.5, // appear slightly before being spoken
-                fps,
-                config: { damping: 20, stiffness: 80 },
-              });
-
-              const opacity = active
-                ? 1
-                : past
-                ? 0.7
-                : future && isActiveLine
-                ? remotionInterpolate(entranceProgress, [0, 1], [0.3, 0.6])
-                : 0.2;
-
+              // Karaoke wipe: accent colour sweeps across the word while it is sung
               return (
                 <span
                   key={wordIdx}
                   style={{
-                    fontFamily: theme.fontFamily,
-                    fontSize: theme.fontSize,
-                    fontWeight: active ? 800 : 600,
-                    color,
-                    textShadow,
-                    transform: `scale(${active ? scale : 1})`,
-                    opacity,
-                    display: 'inline-block',
+                    ...base,
+                    color: 'transparent',
+                    backgroundImage: `linear-gradient(90deg, ${theme.accentColor} ${fill * 100}%, ${theme.dimmedColor} ${fill * 100}%)`,
+                    WebkitBackgroundClip: 'text',
+                    backgroundClip: 'text',
+                    transform: `scale(${scale})`,
+                    filter: singing ? `drop-shadow(0 0 ${18 * pop}px ${theme.glowColor}aa)` : 'none',
                   }}
                 >
-                  {word.word}
+                  {text}
                 </span>
               );
             })}

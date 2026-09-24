@@ -1,63 +1,59 @@
-import { Router, Request, Response } from 'express';
-import path from 'path';
-import { downloadFromYouTube } from '../services/youtube';
-import { createJob, updateJob, getJob, setJobError } from '../services/jobManager';
+import { Router, type Request, type Response } from 'express';
+import { createJob, completeJob, failJob, getJob, serializeJob, setCancelHandler, updateJob } from '../services/jobManager';
+import { downloadAudio, extractVideoId, getVideoInfo, type AudioQuality } from '../services/youtube';
+import { errorMessage, HttpError } from '../lib/errors';
+import { isUuid } from '../lib/validation';
 
 const router = Router();
 
-router.post('/', async (req: Request, res: Response) => {
-  const { url, quality } = req.body;
+const LEGACY_QUALITY: Record<string, AudioQuality> = { '64': 'fast', '128': 'fast', '192': 'balanced', '320': 'best' };
 
-  const YOUTUBE_REGEX = /^https?:\/\/(www\.)?(youtube\.com|youtu\.be|m\.youtube\.com)\//;
-  if (!url || typeof url !== 'string' || !YOUTUBE_REGEX.test(url)) {
-    return res.status(400).json({ error: 'Invalid YouTube URL' });
-  }
+function parseQuality(value: unknown): AudioQuality {
+  if (value === 'fast' || value === 'balanced' || value === 'best') return value;
+  if (typeof value === 'string' && LEGACY_QUALITY[value]) return LEGACY_QUALITY[value];
+  return 'balanced';
+}
 
-  const audioQuality = ['64', '128', '192', '320'].includes(quality) ? quality : '192';
-  const job = createJob();
-  updateJob(job.id, { status: 'transcribing', progress: 5 });
-
-  res.json({ jobId: job.id, status: 'downloading' });
-
-  // Download async
+/** Quick metadata lookup (title / artist / duration) without downloading */
+router.post('/info', async (req: Request, res: Response) => {
+  const videoId = extractVideoId(req.body?.url);
   try {
-    console.log(`[youtube] Starting download for job ${job.id}: ${url} (quality: ${audioQuality}K)`);
-    updateJob(job.id, { progress: 10 });
-
-    const result = await downloadFromYouTube(url, audioQuality);
-
-    updateJob(job.id, {
-      audioFile: result.filepath,
-      progress: 100,
-      status: 'complete',
-      metadata: { title: result.title, duration: result.duration },
-    });
-
-    console.log(`[youtube] Download complete for job ${job.id}: ${result.filename}`);
-  } catch (err: any) {
-    console.error(`[youtube] Download failed for job ${job.id}:`, err.message);
-    setJobError(job.id, err.message);
+    const info = await getVideoInfo(videoId);
+    res.json({ videoId, ...info });
+  } catch (err) {
+    throw new HttpError(502, errorMessage(err, 'Could not read video info'));
   }
 });
 
-router.get('/status/:id', (req: Request, res: Response) => {
-  const id = req.params.id as string;
-  if (!/^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/i.test(id)) {
-    return res.status(400).json({ error: 'Invalid job ID' });
-  }
-  const job = getJob(id);
-  if (!job) return res.status(404).json({ error: 'Job not found' });
+router.post('/', (req: Request, res: Response) => {
+  const videoId = extractVideoId(req.body?.url);
+  const quality = parseQuality(req.body?.quality);
 
-  res.json({
-    id: job.id,
-    status: job.status,
-    progress: job.progress,
-    error: job.error,
-    filename: job.audioFile ? path.basename(job.audioFile) : undefined,
-    title: job.metadata?.title,
-    artist: job.metadata?.artist,
-    duration: job.metadata?.duration,
-  });
+  const job = createJob('youtube', { status: 'downloading', progress: 2, message: 'Reading video info' });
+  res.status(202).json({ jobId: job.id, videoId, status: job.status });
+
+  downloadAudio(videoId, quality, {
+    onSpawn: (kill) => setCancelHandler(job.id, kill),
+    onProgress: (pct) => updateJob(job.id, { progress: 5 + pct * 0.9, message: 'Downloading audio' }),
+  })
+    .then(({ filepath, metadata }) => {
+      completeJob(job.id, { audioFile: filepath, metadata });
+      console.log(`[youtube] ${videoId} downloaded for job ${job.id}`);
+    })
+    .catch((err) => {
+      console.error(`[youtube] Job ${job.id} failed: ${errorMessage(err)}`);
+      failJob(job.id, errorMessage(err, 'Download failed'));
+    });
+});
+
+router.get('/status/:id', (req: Request, res: Response) => {
+  const id = String(req.params.id);
+  if (!isUuid(id)) throw new HttpError(400, 'Invalid job ID');
+  const job = getJob(id);
+  if (!job) throw new HttpError(404, 'Job not found');
+  const out = serializeJob(job);
+  // Flattened fields kept for older clients
+  res.json({ ...out, title: job.metadata?.title, artist: job.metadata?.artist, duration: job.metadata?.duration });
 });
 
 export default router;

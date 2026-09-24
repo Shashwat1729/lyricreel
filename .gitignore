@@ -16,3 +16,6 @@ temp/*
 __pycache__/
 *.pyc
 .DS_Store
+tsconfig.tsbuildinfo
+remotion/out/
+*.log

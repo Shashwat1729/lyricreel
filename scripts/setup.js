@@ -1,49 +1,40 @@
-const { execSync } = require('child_process');
+/* Checks the local toolchain and prepares folders + .env. Safe to run repeatedly. */
+const { execFileSync } = require('child_process');
 const fs = require('fs');
 const path = require('path');
 
-console.log('🎵 Lyric Video Generator - Setup\n');
+const root = path.join(__dirname, '..');
+const isWin = process.platform === 'win32';
 
-// Create directories
-const dirs = ['uploads', 'renders', 'temp'];
-dirs.forEach(dir => {
-  const p = path.join(__dirname, '..', dir);
-  if (!fs.existsSync(p)) {
-    fs.mkdirSync(p, { recursive: true });
-    console.log(`✅ Created ${dir}/`);
+function has(cmd, args = ['--version']) {
+  try {
+    execFileSync(cmd, args, { stdio: 'ignore' });
+    return true;
+  } catch {
+    return false;
   }
-});
-
-// Check FFmpeg
-try {
-  execSync('ffmpeg -version', { stdio: 'pipe' });
-  console.log('✅ FFmpeg found');
-} catch {
-  console.log('❌ FFmpeg not found. Install: https://ffmpeg.org/download.html');
 }
 
-// Check Python
-try {
-  execSync('python3 --version', { stdio: 'pipe' });
-  console.log('✅ Python3 found');
-} catch {
-  console.log('❌ Python3 not found');
+console.log('LyricReel setup\n');
+
+for (const dir of ['uploads', 'renders', 'temp']) {
+  fs.mkdirSync(path.join(root, dir), { recursive: true });
+}
+console.log('[ok] uploads/, renders/ and temp/ folders');
+
+const envPath = path.join(root, '.env');
+if (!fs.existsSync(envPath)) {
+  fs.copyFileSync(path.join(root, '.env.example'), envPath);
+  console.log('[ok] created .env from .env.example');
 }
 
-// Check WhisperX
-try {
-  execSync('python3 -c "import whisperx"', { stdio: 'pipe' });
-  console.log('✅ WhisperX found');
-} catch {
-  console.log('⚠️  WhisperX not installed. Run: pip install whisperx');
-}
+const python = isWin ? 'python' : 'python3';
+const checks = [
+  ['ffmpeg', has('ffmpeg', ['-version']), 'required for YouTube downloads. https://ffmpeg.org/download.html'],
+  ['yt-dlp', has('yt-dlp'), 'required for YouTube links: pip install yt-dlp'],
+  ['python', has(python), 'needed only for WhisperX'],
+  ['whisperx', has(python, ['-c', 'import whisperx']), 'optional: pip install whisperx (better timing, works without LRCLIB)'],
+];
+for (const [name, ok, hint] of checks) console.log(`${ok ? '[ok]  ' : '[--]  '}${name}${ok ? '' : `  (${hint})`}`);
 
-// Copy .env if needed
-const envPath = path.join(__dirname, '..', '.env');
-const envExample = path.join(__dirname, '..', '.env.example');
-if (!fs.existsSync(envPath) && fs.existsSync(envExample)) {
-  fs.copyFileSync(envExample, envPath);
-  console.log('✅ Created .env from .env.example');
-}
-
-console.log('\n🚀 Setup complete! Run: npm run dev');
+console.log('\nDone. Start everything with: npm run dev');

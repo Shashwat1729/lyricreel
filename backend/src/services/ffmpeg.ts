@@ -1,57 +1,60 @@
-import { spawn } from 'child_process';
+import fs from 'fs';
 import path from 'path';
+import { config } from '../config';
+import { runProcess } from '../lib/process';
 
-const FFMPEG = process.env.FFMPEG_PATH || 'ffmpeg';
-
-export async function getAudioDuration(audioPath: string): Promise<number> {
-  return new Promise((resolve, reject) => {
-    const proc = spawn(FFMPEG, ['-i', audioPath, '-f', 'null', '-'], { stdio: ['pipe', 'pipe', 'pipe'] });
-    let stderr = '';
-    proc.stderr.on('data', (d) => { stderr += d.toString(); });
-    proc.on('close', () => {
-      const match = stderr.match(/Duration:\s*(\d+):(\d+):(\d+)\.(\d+)/);
-      if (match) {
-        const hours = parseInt(match[1]);
-        const mins = parseInt(match[2]);
-        const secs = parseInt(match[3]);
-        const ms = parseInt(match[4]);
-        resolve(hours * 3600 + mins * 60 + secs + ms / 100);
-      } else {
-        reject(new Error('Could not determine audio duration'));
-      }
-    });
-  });
+/** Remotion ships ffprobe with its compositor; use it when the system has none. */
+function bundledFfprobe(): { command: string; env: NodeJS.ProcessEnv } | null {
+  const base = path.join(config.remotionDir, 'node_modules', '@remotion');
+  let dirs: string[];
+  try { dirs = fs.readdirSync(base).filter((d) => d.startsWith(`compositor-${process.platform}-${process.arch}`)); } catch { return null; }
+  for (const dir of dirs) {
+    const bin = path.join(base, dir, process.platform === 'win32' ? 'ffprobe.exe' : 'ffprobe');
+    if (fs.existsSync(bin)) {
+      const libDir = path.dirname(bin);
+      return { command: bin, env: { ...process.env, LD_LIBRARY_PATH: [libDir, process.env.LD_LIBRARY_PATH].filter(Boolean).join(path.delimiter), DYLD_LIBRARY_PATH: libDir } };
+    }
+  }
+  return null;
 }
 
-export async function normalizeAudio(inputPath: string, outputPath: string): Promise<string> {
-  return new Promise((resolve, reject) => {
-    const proc = spawn(FFMPEG, [
-      '-i', inputPath,
-      '-af', 'loudnorm=I=-16:TP=-1.5:LRA=11',
-      '-ar', '44100',
-      '-y',
-      outputPath,
-    ]);
-    proc.on('close', (code) => {
-      if (code === 0) resolve(outputPath);
-      else reject(new Error(`FFmpeg normalize failed with code ${code}`));
-    });
-    proc.on('error', reject);
-  });
+function parseDurationLine(text: string): number | null {
+  const m = text.match(/Duration:\s*(\d+):(\d+):(\d+(?:\.\d+)?)/);
+  if (!m) return null;
+  return Number(m[1]) * 3600 + Number(m[2]) * 60 + Number(m[3]);
 }
 
-export async function extractAudio(inputPath: string, outputPath: string): Promise<string> {
-  return new Promise((resolve, reject) => {
-    const proc = spawn(FFMPEG, [
-      '-i', inputPath,
-      '-vn', '-acodec', 'pcm_s16le',
-      '-ar', '16000', '-ac', '1',
-      '-y', outputPath,
-    ]);
-    proc.on('close', (code) => {
-      if (code === 0) resolve(outputPath);
-      else reject(new Error(`FFmpeg extract failed with code ${code}`));
-    });
-    proc.on('error', reject);
-  });
+/**
+ * Audio duration in seconds. Tries ffprobe (system, then Remotion's bundled copy), then `ffmpeg -i`.
+ * Resolves null when neither tool is available or the duration can't be read.
+ */
+export async function getAudioDuration(audioPath: string): Promise<number | null> {
+  const probeArgs = ['-v', 'error', '-show_entries', 'format=duration', '-of', 'default=noprint_wrappers=1:nokey=1', audioPath];
+  const bundled = bundledFfprobe();
+  const probes = [{ command: config.ffprobePath, env: process.env }, ...(bundled ? [bundled] : [])];
+  for (const probe of probes) {
+    try {
+      const { code, stdout } = await runProcess(probe.command, probeArgs, { timeoutMs: 20_000, env: probe.env });
+      const n = Number.parseFloat(stdout.trim());
+      if (code === 0 && Number.isFinite(n) && n > 0) return n;
+    } catch { /* try the next one */ }
+  }
+
+  try {
+    // `ffmpeg -i file` with no output exits non-zero but prints the duration header
+    const { stderr } = await runProcess(config.ffmpegPath, ['-hide_banner', '-i', audioPath], { timeoutMs: 20_000 });
+    const d = parseDurationLine(stderr);
+    if (d && d > 0) return d;
+  } catch { /* not installed */ }
+
+  return null;
+}
+
+export async function isAvailable(command: string, args = ['-version']): Promise<boolean> {
+  try {
+    const { code } = await runProcess(command, args, { timeoutMs: 10_000 });
+    return code === 0;
+  } catch {
+    return false;
+  }
 }
