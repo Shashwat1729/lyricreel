@@ -1,0 +1,11 @@
+**/node_modules
+**/.next
+**/dist
+uploads
+renders
+temp
+.git
+*.mp4
+*.mp3
+*.wav
+.env

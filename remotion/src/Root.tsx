@@ -19,7 +19,9 @@ const defaultProps: LyricVideoProps = {
     { word: 'generator', start: 4.6, end: 5.2 },
   ],
   theme: 'neon',
-  backgroundUrl: null,
+  title: 'Test Song',
+  artist: 'LyricReel',
+  clipStart: 0,
   durationInSeconds: 10,
 };
 
@@ -35,7 +37,7 @@ export const Root: React.FC = () => {
         height={1920}
         defaultProps={defaultProps}
         calculateMetadata={({ props }) => ({
-          durationInFrames: Math.ceil(props.durationInSeconds * 24),
+          durationInFrames: Math.max(1, Math.ceil((Number(props.durationInSeconds) || 1) * 24)),
         })}
       />
     </>

@@ -1,18 +1,18 @@
 {
-  "name": "lyric-video-remotion",
+  "name": "lyricreel-remotion",
   "version": "1.0.0",
   "scripts": {
-    "preview": "remotion preview src/index.ts",
-    "render": "remotion render src/index.ts LyricVideo",
-    "build": "tsc --noEmit"
+    "preview": "remotion studio src/index.ts",
+    "render": "remotion render src/index.ts LyricVideo out/video.mp4",
+    "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "@remotion/cli": "^4.0.0",
-    "@remotion/player": "^4.0.0",
-    "@remotion/renderer": "^4.0.0",
+    "@remotion/bundler": "4.0.467",
+    "@remotion/cli": "4.0.467",
+    "@remotion/renderer": "4.0.467",
     "react": "^18.2.0",
     "react-dom": "^18.2.0",
-    "remotion": "^4.0.0"
+    "remotion": "4.0.467"
   },
   "devDependencies": {
     "@types/react": "^18.2.0",

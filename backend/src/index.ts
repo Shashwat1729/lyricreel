@@ -1,131 +1,198 @@
-import express from 'express';
+import { config } from './config';
+import express, { type NextFunction, type Request, type Response } from 'express';
 import cors from 'cors';
+import fs from 'fs';
 import path from 'path';
-import dotenv from 'dotenv';
-
-dotenv.config({ path: path.resolve(__dirname, '../../.env') });
+import rateLimit from 'express-rate-limit';
 
 import uploadRouter from './routes/upload';
 import transcriptionRouter from './routes/transcription';
 import videoRouter from './routes/video';
 import youtubeRouter from './routes/youtube';
-import { ensureDir } from './utils/fileUtils';
-import { startJobCleanup, getJob } from './services/jobManager';
+import { HttpError, errorMessage } from './lib/errors';
+import { isUuid } from './lib/validation';
+import { cancelAllJobs, cancelJob, getJob, isTerminal, serializeJob, startJobCleanup } from './services/jobManager';
+import { isAvailable } from './services/ffmpeg';
+import { isWhisperAvailable } from './services/transcription';
+import { warmUpRenderer } from './services/videoRenderer';
 
 const app = express();
+app.disable('x-powered-by');
+app.set('trust proxy', 'loopback');
 
-const PORT = process.env.PORT || 5001;
-const FRONTEND_URL = process.env.FRONTEND_URL || 'http://localhost:5000';
+app.use(cors({
+  origin: (origin, cb) => {
+    // Allow same-origin / curl (no Origin) and configured frontends
+    if (!origin || config.corsOrigins.includes('*') || config.corsOrigins.includes(origin)) cb(null, true);
+    else cb(null, false);
+  },
+}));
+app.use(express.json({ limit: '2mb' }));
+app.use((_req, res, next) => {
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+  res.setHeader('Referrer-Policy', 'no-referrer');
+  next();
+});
 
-// Middleware
-app.use(cors({ origin: [FRONTEND_URL, 'http://127.0.0.1:5000', 'http://localhost:3000'], credentials: true }));
-app.use(express.json({ limit: '10mb' }));
-// Videos served via /video/:id endpoint with UUID validation — no static directory
-// Uploads not served statically — use /video/:id endpoint for authorized access
-
-// Rate limiting (POST/mutation only — GET status polls are unrestricted)
-import rateLimit from 'express-rate-limit';
-const apiLimiter = rateLimit({
-  windowMs: 60 * 1000,
-  max: 30,
-  message: { error: 'Too many requests, please try again later' },
+const mutationLimiter = rateLimit({
+  windowMs: 60_000,
+  limit: 60,
+  standardHeaders: 'draft-7',
+  legacyHeaders: false,
   skip: (req) => req.method === 'GET',
+  message: { error: 'Too many requests, please slow down' },
 });
 const renderLimiter = rateLimit({
-  windowMs: 5 * 60 * 1000,
-  max: 5,
-  message: { error: 'Render limit reached. Please wait before generating another video.' },
+  windowMs: 10 * 60_000,
+  limit: 20,
+  standardHeaders: 'draft-7',
+  legacyHeaders: false,
   skip: (req) => req.method === 'GET',
+  message: { error: 'Render limit reached. Please wait a few minutes before starting another render.' },
 });
 
-// Static file serving for Remotion audio access (internal only, validated UUIDs)
+// Audio for the renderer and the in-browser preview. Only server-generated file names are served.
 app.use('/uploads', (req, res, next) => {
-  const filename = path.basename(req.path);
-  if (!/^[a-f0-9-]+\.\w{2,5}$/.test(filename)) return res.status(403).json({ error: 'Forbidden' });
-  next();
-}, express.static(path.resolve(__dirname, '../uploads')));
-
-// Routes with rate limiters applied correctly
-app.use('/upload-song', apiLimiter, uploadRouter);
-app.use('/generate-transcript', apiLimiter, transcriptionRouter);
-app.use('/generate-video', renderLimiter, videoRouter);
-app.use('/youtube-download', apiLimiter, youtubeRouter);
-
-// Video serving endpoint (separate from generate-video router)
-import fs from 'fs';
-app.get('/video/:id', (req, res) => {
-  const id = req.params.id;
-  if (!/^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/i.test(id)) {
-    return res.status(400).json({ error: 'Invalid video ID' });
+  const name = path.basename(req.path);
+  if (req.path !== `/${name}` || !/^[0-9a-f-]{36}\.[a-z0-9]{2,5}$/i.test(name)) {
+    return res.status(404).json({ error: 'Not found' });
   }
-  const videoPath = path.resolve(__dirname, '../renders', `${id}.mp4`);
-  if (!fs.existsSync(videoPath)) return res.status(404).json({ error: 'Video not found' });
-  res.setHeader('Content-Disposition', `attachment; filename="${id}.mp4"`);
-  res.sendFile(videoPath);
+  next();
+}, express.static(config.uploadDir, { dotfiles: 'deny', index: false, fallthrough: false, maxAge: '1h' }));
+
+app.use('/upload-song', mutationLimiter, uploadRouter);
+app.use('/generate-transcript', mutationLimiter, transcriptionRouter);
+app.use('/generate-video', renderLimiter, videoRouter);
+app.use('/youtube-download', mutationLimiter, youtubeRouter);
+
+// Rendered videos. Streams inline (with range support); ?download=1 forces a download.
+app.get('/video/:id', (req, res, next) => {
+  const id = String(req.params.id);
+  if (!isUuid(id)) throw new HttpError(400, 'Invalid video ID');
+  const file = path.join(config.renderDir, `${id}.mp4`);
+  if (!fs.existsSync(file)) throw new HttpError(404, 'Video not found. It may have expired.');
+  if (req.query.download) {
+    const name = typeof req.query.name === 'string' ? req.query.name.replace(/[^\w\s.-]/g, '').trim().slice(0, 80) : '';
+    res.attachment(`${name || `lyricreel-${id.slice(0, 8)}`}.mp4`);
+  }
+  res.sendFile(file, { headers: { 'Cache-Control': 'private, max-age=3600' } }, (err) => { if (err && !res.headersSent) next(err); });
 });
 
-// SSE endpoint for real-time job progress
+app.get('/jobs/:id', (req, res) => {
+  const id = String(req.params.id);
+  if (!isUuid(id)) throw new HttpError(400, 'Invalid job ID');
+  const job = getJob(id);
+  if (!job) throw new HttpError(404, 'Job not found');
+  res.json(serializeJob(job));
+});
+
+app.delete('/jobs/:id', mutationLimiter, (req, res) => {
+  const id = String(req.params.id);
+  if (!isUuid(id)) throw new HttpError(400, 'Invalid job ID');
+  const job = getJob(id);
+  if (!job) throw new HttpError(404, 'Job not found');
+  res.json({ cancelled: cancelJob(id) });
+});
+
+// Server-Sent Events stream of a job's progress
 app.get('/events/:jobId', (req, res) => {
-  const jobId = req.params.jobId;
-  if (!/^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/i.test(jobId)) {
-    return res.status(400).json({ error: 'Invalid job ID' });
-  }
+  const id = String(req.params.jobId);
+  if (!isUuid(id)) throw new HttpError(400, 'Invalid job ID');
 
   res.writeHead(200, {
     'Content-Type': 'text/event-stream',
-    'Cache-Control': 'no-cache',
+    'Cache-Control': 'no-cache, no-transform',
     Connection: 'keep-alive',
+    'X-Accel-Buffering': 'no',
   });
 
-  const interval = setInterval(() => {
-    const job = getJob(jobId);
+  let last = '';
+  const send = () => {
+    const job = getJob(id);
     if (!job) {
-      res.write(`data: ${JSON.stringify({ error: 'Job not found' })}\n\n`);
-      clearInterval(interval);
-      res.end();
-      return;
+      res.write(`event: error\ndata: ${JSON.stringify({ error: 'Job not found' })}\n\n`);
+      return stop();
     }
-    res.write(`data: ${JSON.stringify({ status: job.status, progress: job.progress, error: job.error })}\n\n`);
-    if (job.status === 'complete' || job.status === 'error') {
-      clearInterval(interval);
-      res.end();
+    const payload = JSON.stringify(serializeJob(job));
+    if (payload !== last) {
+      last = payload;
+      res.write(`data: ${payload}\n\n`);
     }
-  }, 500);
-
-  req.on('close', () => clearInterval(interval));
+    if (isTerminal(job)) stop();
+  };
+  const interval = setInterval(send, 500);
+  const heartbeat = setInterval(() => res.write(': ping\n\n'), 15_000);
+  function stop() {
+    clearInterval(interval);
+    clearInterval(heartbeat);
+    res.end();
+  }
+  req.on('close', () => { clearInterval(interval); clearInterval(heartbeat); });
+  send();
 });
 
-// Health check
-app.get('/health', (_req, res) => res.json({ status: 'ok', uptime: process.uptime() }));
-
-// Ensure directories exist before starting
-async function start() {
-  try {
-    await Promise.all([
-      ensureDir('./uploads'),
-      ensureDir('./renders'),
-      ensureDir('./temp'),
-    ]);
-  } catch (err) {
-    console.error('Failed to create required directories:', err);
-    process.exit(1);
+let capabilities: Promise<Record<string, boolean>> | null = null;
+function detectCapabilities() {
+  if (!capabilities) {
+    capabilities = Promise.all([
+      isAvailable(config.ffmpegPath),
+      isAvailable(config.ffprobePath),
+      isAvailable(config.ytDlpPath, ['--version']),
+      isWhisperAvailable(),
+      Promise.resolve(fs.existsSync(path.join(config.remotionDir, 'node_modules', '@remotion', 'renderer'))),
+    ]).then(([ffmpeg, ffprobe, ytDlp, whisperx, remotion]) => ({ ffmpeg, ffprobe, ytDlp, whisperx, remotion }));
   }
-
-  startJobCleanup();
-
-  app.listen(PORT, () => {
-    console.log(`🎵 Lyric Video API running on http://localhost:${PORT}`);
-  });
+  return capabilities;
 }
 
-start();
-
-// Graceful shutdown
-process.on('SIGTERM', () => {
-  console.log('SIGTERM received. Shutting down gracefully...');
-  process.exit(0);
+app.get('/health', async (_req, res) => {
+  res.json({ status: 'ok', uptime: Math.round(process.uptime()), capabilities: await detectCapabilities() });
 });
-process.on('SIGINT', () => {
-  console.log('SIGINT received. Shutting down...');
-  process.exit(0);
+
+app.use((_req, res) => {
+  res.status(404).json({ error: 'Not found' });
+});
+
+// Central error handler: always JSON, never leaks stack traces
+app.use((err: unknown, _req: Request, res: Response, _next: NextFunction) => {
+  const parseFailed = (err as { type?: string }).type === 'entity.parse.failed';
+  const status = err instanceof HttpError ? err.status : parseFailed ? 400 : (err as { status?: number }).status ?? 500;
+  const message = parseFailed ? 'Invalid JSON body' : status >= 500 ? 'Internal server error' : errorMessage(err);
+  if (status >= 500) console.error('[server]', err);
+  if (res.headersSent) return;
+  res.status(status).json({ error: message });
+});
+
+async function start() {
+  for (const dir of [config.uploadDir, config.renderDir, config.tempDir]) {
+    fs.mkdirSync(dir, { recursive: true });
+  }
+  startJobCleanup();
+
+  const server = app.listen(config.port, () => {
+    console.log(`LyricReel API listening on http://localhost:${config.port}`);
+    detectCapabilities().then((caps) => {
+      const missing = Object.entries(caps).filter(([, ok]) => !ok).map(([name]) => name);
+      if (missing.length) console.warn(`[startup] Missing optional tools: ${missing.join(', ')} (see README)`);
+    });
+    if (process.env.REMOTION_WARMUP !== 'false') warmUpRenderer();
+  });
+
+  const shutdown = (signal: string) => {
+    console.log(`${signal} received, shutting down`);
+    cancelAllJobs();
+    server.close(() => process.exit(0));
+    setTimeout(() => process.exit(0), 5000).unref();
+  };
+  process.on('SIGTERM', () => shutdown('SIGTERM'));
+  process.on('SIGINT', () => shutdown('SIGINT'));
+}
+
+process.on('unhandledRejection', (reason) => {
+  console.error('[server] Unhandled rejection:', errorMessage(reason));
+});
+
+start().catch((err) => {
+  console.error('Failed to start server:', err);
+  process.exit(1);
 });

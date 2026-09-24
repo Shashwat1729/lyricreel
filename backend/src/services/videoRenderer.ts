@@ -1,167 +1,195 @@
-import { spawn } from 'child_process';
-import path from 'path';
 import fs from 'fs';
 import os from 'os';
-import { VideoConfig } from '../types';
-import { setJobComplete, setJobError, setJobProcessing, updateJob } from './jobManager';
+import path from 'path';
+import { createRequire } from 'module';
+import { config } from '../config';
+import { errorMessage } from '../lib/errors';
+import { completeJob, failJob, getJob, isTerminal, setCancelHandler, updateJob } from './jobManager';
+import type { VideoConfig } from '../types';
 
-const FRAME_PROGRESS_REGEX = /Rendered\s+(\d+)\s+of\s+(\d+)\s+frames/i;
-const STDOUT_LINE_SPLIT_REGEX = /\r?\n/;
-
-function getBackendPath(): string {
-  return path.resolve(__dirname, '../..');
-}
-
-export function getRemotionProjectPath(): string {
-  return path.resolve(getBackendPath(), '../remotion');
-}
-
-/**
- * Determine optimal concurrency based on available CPU cores and current load.
- * Uses 50-75% of available cores, minimum 2 (unless single-core).
+/*
+ * Rendering uses Remotion's Node APIs (loaded from the remotion/ project so the backend doesn't
+ * need its own copy). The project is bundled once and reused for every render, and renders run
+ * through a small queue so several requests can't starve the machine.
  */
-function getOptimalConcurrency(): number {
-  const totalCores = os.cpus().length;
-  const loadAvg1m = os.loadavg()[0]; // 1-minute load average
-  const availableCores = Math.max(1, totalCores - Math.ceil(loadAvg1m));
-  
-  // Use 75% of available cores, min 3, max 12
-  const concurrency = Math.min(12, Math.max(3, Math.floor(availableCores * 0.75)));
-  
-  console.log(`[videoRenderer] CPU: ${totalCores} cores, load: ${loadAvg1m.toFixed(1)}, using concurrency: ${concurrency}`);
-  return concurrency;
+
+const COMPOSITION_ID = 'LyricVideo';
+
+interface RemotionModules {
+  bundle: (opts: { entryPoint: string; onProgress?: (p: number) => void }) => Promise<string>;
+  selectComposition: (opts: Record<string, unknown>) => Promise<{ durationInFrames: number; fps: number }>;
+  renderMedia: (opts: Record<string, unknown>) => Promise<unknown>;
+  makeCancelSignal: () => { cancelSignal: unknown; cancel: () => void };
 }
 
-export async function renderVideo(jobId: string, config: VideoConfig, outputPath: string): Promise<string> {
-  const props = JSON.stringify({
-    audioSrc: `http://localhost:${process.env.PORT || 5001}/uploads/${path.basename(config.audioUrl)}`,
-    words: config.words,
-    theme: config.theme,
-    backgroundUrl: config.backgroundUrl ?? null,
-    durationInSeconds: config.durationInSeconds,
-  });
+let modules: RemotionModules | null = null;
+let serveUrlPromise: Promise<string> | null = null;
 
-  // Write props to temp file to avoid shell injection via --props arg
-  const propsFile = path.resolve(getBackendPath(), `../temp/props-${jobId}.json`);
+function loadRemotion(): RemotionModules {
+  if (modules) return modules;
+  const pkg = path.join(config.remotionDir, 'package.json');
+  if (!fs.existsSync(pkg)) throw new Error(`Remotion project not found at ${config.remotionDir}`);
+  const req = createRequire(pkg);
   try {
-    fs.mkdirSync(path.dirname(propsFile), { recursive: true });
-    fs.writeFileSync(propsFile, props, 'utf-8');
-  } catch (err: any) {
-    setJobError(jobId, `Failed to write render props: ${err.message}`);
-    throw err;
+    const bundler = req('@remotion/bundler');
+    const renderer = req('@remotion/renderer');
+    modules = {
+      bundle: bundler.bundle,
+      selectComposition: renderer.selectComposition,
+      renderMedia: renderer.renderMedia,
+      makeCancelSignal: renderer.makeCancelSignal,
+    };
+    return modules;
+  } catch (err) {
+    throw new Error(`Remotion is not installed. Run "npm install" in the remotion folder (${errorMessage(err)})`);
   }
+}
 
-  const remotionBin = path.resolve(getRemotionProjectPath(), 'node_modules/.bin/remotion');
-  const command = fs.existsSync(remotionBin) ? remotionBin : (process.platform === 'win32' ? 'npx.cmd' : 'npx');
+function getServeUrl(): Promise<string> {
+  if (!serveUrlPromise) {
+    const { bundle } = loadRemotion();
+    console.log('[render] Bundling Remotion project (first render only)...');
+    serveUrlPromise = bundle({ entryPoint: path.join(config.remotionDir, 'src/index.ts') })
+      .then((url) => { console.log('[render] Bundle ready'); return url; })
+      .catch((err) => { serveUrlPromise = null; throw err; });
+  }
+  return serveUrlPromise;
+}
 
-  console.log(`[videoRenderer] Starting render for job ${jobId}`);
-  setJobProcessing(jobId);
-  updateJob(jobId, { progress: 0 });
+/** Start bundling in the background so the first render doesn't pay for it. */
+export function warmUpRenderer(): void {
+  try {
+    getServeUrl().catch((err) => console.warn(`[render] Warm-up bundle failed: ${errorMessage(err)}`));
+  } catch (err) {
+    console.warn(`[render] ${errorMessage(err)}`);
+  }
+}
 
-  return new Promise((resolve, reject) => {
-    let stderr = '';
-    let settled = false;
-    let lastProgress = -1;
-    const RENDER_TIMEOUT_MS = 15 * 60 * 1000; // 15 minute timeout
+function frameConcurrency(): number {
+  if (config.render.concurrency) return config.render.concurrency;
+  const cores = os.cpus().length || 2;
+  return Math.max(1, Math.min(8, Math.floor(cores / 2)));
+}
 
-    const cleanup = () => {
-      try { fs.unlinkSync(propsFile); } catch {}
-    };
+function findBrowser(): string | null {
+  if (config.render.browserExecutable) return config.render.browserExecutable;
+  return null;
+}
 
-    const handleFailure = (error: Error) => {
-      if (settled) return;
-      settled = true;
-      cleanup();
-      console.error(`[videoRenderer] Render failed for job ${jobId}: ${error.message}`);
-      try { setJobError(jobId, error.message); } catch {}
-      reject(error);
-    };
+interface QueueItem {
+  jobId: string;
+  video: VideoConfig;
+  outputPath: string;
+}
 
-    const entryPoint = path.resolve(getRemotionProjectPath(), 'src/index.ts');
+const queue: QueueItem[] = [];
+let running = 0;
 
-    const concurrency = getOptimalConcurrency();
-    // Browser launch timeout: 90s for dev/WSL, 30s in production
-    const browserTimeout = process.env.NODE_ENV === 'production' ? '30000' : '90000';
+export function queuePosition(jobId: string): number {
+  return queue.findIndex((q) => q.jobId === jobId) + 1;
+}
 
-    // Use bundled browser if available (avoids search delay)
-    const bundledBrowser = path.resolve(getRemotionProjectPath(), 'node_modules/.remotion/chrome-headless-shell/linux64/chrome-headless-shell-linux64/chrome-headless-shell');
-    const browserArgs: string[] = fs.existsSync(bundledBrowser)
-      ? [`--browser-executable=${bundledBrowser}`]
-      : [];
+function refreshQueueMessages(): void {
+  queue.forEach((item, i) => updateJob(item.jobId, { status: 'queued', message: `Waiting for ${i + 1} render${i ? 's' : ''} ahead` }));
+}
 
-    // Performance flags: gl=angle for GPU, JPEG frames (faster encode), scale down slightly
-    const perfArgs = [
-      '--gl=angle',           // GPU-accelerated rendering
-      '--jpeg-quality=85',    // Faster frame encoding than PNG
-      '--scale=1',            // Full resolution
-      '--muted',              // Skip audio decode during frame render
-    ];
-
-    const args = command === remotionBin
-      ? ['render', entryPoint, 'LyricVideo', `--props=${propsFile}`, `--output=${outputPath}`, `--timeout=${browserTimeout}`, `--concurrency=${concurrency}`, ...browserArgs, ...perfArgs]
-      : ['remotion', 'render', entryPoint, 'LyricVideo', `--props=${propsFile}`, `--output=${outputPath}`, `--timeout=${browserTimeout}`, `--concurrency=${concurrency}`, ...browserArgs, ...perfArgs];
-
-    const proc = spawn(
-      command,
-      args,
-      {
-        cwd: getRemotionProjectPath(),
-        stdio: ['ignore', 'pipe', 'pipe'],
-      }
-    );
-
-    // Kill render if it exceeds timeout
-    const timeout = setTimeout(() => {
-      proc.kill('SIGTERM');
-      handleFailure(new Error('Render timed out after 15 minutes'));
-    }, RENDER_TIMEOUT_MS);
-
-    proc.stdout.on('data', (data) => {
-      const output = data.toString();
-      for (const line of output.split(STDOUT_LINE_SPLIT_REGEX)) {
-        const match = line.match(FRAME_PROGRESS_REGEX);
-        if (!match) continue;
-        const renderedFrames = parseInt(match[1], 10);
-        const totalFrames = parseInt(match[2], 10);
-        if (totalFrames <= 0) continue;
-        const progress = Math.min(Math.round((renderedFrames / totalFrames) * 100), 99);
-        if (progress !== lastProgress) {
-          lastProgress = progress;
-          updateJob(jobId, { progress });
-        }
-      }
-    });
-
-    proc.stderr.on('data', (data) => {
-      const output = data.toString();
-      if (stderr.length < 10000) stderr += output;
-      for (const line of output.split(STDOUT_LINE_SPLIT_REGEX)) {
-        const match = line.match(FRAME_PROGRESS_REGEX);
-        if (!match) continue;
-        const renderedFrames = parseInt(match[1], 10);
-        const totalFrames = parseInt(match[2], 10);
-        if (totalFrames <= 0) continue;
-        const progress = Math.min(Math.round((renderedFrames / totalFrames) * 100), 99);
-        if (progress !== lastProgress) {
-          lastProgress = progress;
-          updateJob(jobId, { progress });
-        }
-      }
-    });
-    proc.on('error', (error) => handleFailure(new Error(`Failed to start Remotion: ${error.message}`)));
-
-    proc.on('close', (code) => {
-      clearTimeout(timeout);
-      if (settled) return;
-      if (code === 0) {
-        settled = true;
-        cleanup();
-        console.log(`[videoRenderer] Render completed for job ${jobId}`);
-        setJobComplete(jobId, outputPath);
-        resolve(outputPath);
-      } else {
-        handleFailure(new Error(stderr.trim().slice(0, 500) || `Remotion render exited with code ${code}`));
-      }
-    });
+/** Add a render to the queue. Progress, completion and errors are reported on the job. */
+export function enqueueRender(jobId: string, video: VideoConfig, outputPath: string): void {
+  queue.push({ jobId, video, outputPath });
+  setCancelHandler(jobId, () => {
+    const idx = queue.findIndex((q) => q.jobId === jobId);
+    if (idx >= 0) { queue.splice(idx, 1); refreshQueueMessages(); }
   });
+  refreshQueueMessages();
+  pump();
+}
+
+function pump(): void {
+  while (running < config.render.maxConcurrent && queue.length) {
+    const item = queue.shift()!;
+    refreshQueueMessages();
+    const job = getJob(item.jobId);
+    if (!job || isTerminal(job)) continue;
+    running++;
+    runRender(item)
+      .catch((err) => {
+        const job = getJob(item.jobId);
+        if (job && !isTerminal(job)) failJob(item.jobId, friendlyRenderError(err));
+        console.error(`[render] Job ${item.jobId} failed: ${errorMessage(err)}`);
+        fs.rmSync(item.outputPath, { force: true });
+      })
+      .finally(() => { running--; pump(); });
+  }
+}
+
+function friendlyRenderError(err: unknown): string {
+  const msg = errorMessage(err, 'Render failed');
+  if (/cancel/i.test(msg)) return 'Render cancelled';
+  if (/browser|chrom/i.test(msg) && /(download|launch|found|executable)/i.test(msg)) {
+    return 'Could not start the headless browser for rendering. Set REMOTION_BROWSER_EXECUTABLE or allow Remotion to download Chrome Headless Shell.';
+  }
+  return msg.length > 500 ? `${msg.slice(0, 500)}…` : msg;
+}
+
+async function runRender({ jobId, video, outputPath }: QueueItem): Promise<void> {
+  const { selectComposition, renderMedia, makeCancelSignal } = loadRemotion();
+  const { cancelSignal, cancel } = makeCancelSignal();
+  setCancelHandler(jobId, cancel);
+
+  updateJob(jobId, { status: 'rendering', progress: 1, message: 'Preparing renderer' });
+  const serveUrl = await getServeUrl();
+
+  const inputProps = {
+    audioSrc: `http://127.0.0.1:${config.port}/uploads/${path.basename(video.audioFile)}`,
+    words: video.words,
+    theme: video.theme,
+    title: video.title ?? null,
+    artist: video.artist ?? null,
+    clipStart: video.clipStart,
+    durationInSeconds: video.durationInSeconds,
+  };
+
+  const browserExecutable = findBrowser();
+  const common = {
+    serveUrl,
+    inputProps,
+    timeoutInMilliseconds: 60_000,
+    ...(browserExecutable ? { browserExecutable } : {}),
+    ...(config.render.gl ? { chromiumOptions: { gl: config.render.gl } } : {}),
+    logLevel: 'warn',
+  };
+
+  const composition = await selectComposition({ ...common, id: COMPOSITION_ID });
+  const job = getJob(jobId);
+  if (!job || isTerminal(job)) return;
+
+  updateJob(jobId, { message: 'Rendering frames', progress: 2 });
+  let lastPct = -1;
+
+  await renderMedia({
+    ...common,
+    composition,
+    codec: 'h264',
+    outputLocation: outputPath,
+    overwrite: true,
+    imageFormat: 'jpeg',
+    jpegQuality: 85,
+    concurrency: frameConcurrency(),
+    cancelSignal,
+    onProgress: ({ progress, renderedFrames, encodedFrames, stitchStage }: { progress: number; renderedFrames: number; encodedFrames: number; stitchStage: string }) => {
+      const pct = Math.min(99, Math.max(2, Math.round(progress * 100)));
+      if (pct === lastPct) return;
+      lastPct = pct;
+      const message = stitchStage === 'muxing'
+        ? 'Adding audio'
+        : renderedFrames < composition.durationInFrames
+          ? `Rendering frames (${renderedFrames}/${composition.durationInFrames})`
+          : `Encoding video (${encodedFrames}/${composition.durationInFrames})`;
+      updateJob(jobId, { progress: pct, message });
+    },
+  });
+
+  if (!fs.existsSync(outputPath)) throw new Error('Render finished but the video file is missing');
+  completeJob(jobId, { outputFile: outputPath });
+  console.log(`[render] Job ${jobId} complete -> ${path.basename(outputPath)}`);
 }

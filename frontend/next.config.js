@@ -1,15 +1,9 @@
-﻿/** @type {import('next').NextConfig} */
+/** @type {import('next').NextConfig} */
 const nextConfig = {
   reactStrictMode: true,
-  webpack: (config, { isServer }) => {
-    if (isServer) {
-      config.optimization = {
-        ...config.optimization,
-        splitChunks: false,
-        runtimeChunk: false,
-      };
-    }
-    return config;
+  poweredByHeader: false,
+  images: {
+    remotePatterns: [{ protocol: 'https', hostname: 'i.ytimg.com' }],
   },
 };
 

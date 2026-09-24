@@ -1,46 +1,55 @@
+import type { THEMES } from '../config';
+
 export interface WordTimestamp {
   word: string;
   start: number;
   end: number;
 }
 
-export interface TranscriptSegment {
-  text: string;
-  start: number;
-  end: number;
-  words: WordTimestamp[];
-}
-
 export interface TranscriptResult {
-  segments?: TranscriptSegment[];
   word_segments: WordTimestamp[];
   language?: string;
   source?: string;
   lyricsMetadata?: { title: string; artist: string };
 }
 
-export type ThemeName = 'neon' | 'anime' | 'sad' | 'synthwave' | 'minimalist' | 'cinematic';
+export type ThemeName = (typeof THEMES)[number];
 
-export type JobStatus = 'pending' | 'transcribing' | 'rendering' | 'complete' | 'error';
+export type JobKind = 'youtube' | 'transcribe' | 'render';
+
+export type JobStatus = 'pending' | 'queued' | 'downloading' | 'transcribing' | 'rendering' | 'complete' | 'error' | 'cancelled';
+
+export interface JobMetadata {
+  title?: string;
+  track?: string;
+  artist?: string;
+  duration?: number;
+  thumbnail?: string;
+}
 
 export interface Job {
   id: string;
+  kind: JobKind;
   status: JobStatus;
   progress: number;
-  audioFile: string;
-  theme: ThemeName;
+  /** Human readable description of the current step */
+  message?: string;
+  audioFile?: string;
+  theme?: ThemeName;
   transcript?: TranscriptResult;
-  metadata?: { title?: string; artist?: string; duration?: number };
+  metadata?: JobMetadata;
   outputFile?: string;
   error?: string;
-  createdAt: Date;
-  updatedAt: Date;
+  createdAt: number;
+  updatedAt: number;
 }
 
 export interface VideoConfig {
-  audioUrl: string;
+  audioFile: string;
   words: WordTimestamp[];
   theme: ThemeName;
-  backgroundUrl?: string;
+  title?: string;
+  artist?: string;
+  clipStart: number;
   durationInSeconds: number;
 }

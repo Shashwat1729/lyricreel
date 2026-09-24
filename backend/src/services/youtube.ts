@@ -1,167 +1,151 @@
-import { spawn } from 'child_process';
-import path from 'path';
 import fs from 'fs';
-import { v4 as uuidv4 } from 'uuid';
+import path from 'path';
+import { randomUUID } from 'crypto';
+import { config } from '../config';
+import { runProcess, tail } from '../lib/process';
+import { HttpError } from '../lib/errors';
+import { parseArtistAndTrack } from './lyrics';
+import type { JobMetadata } from '../types';
 
-const UPLOAD_DIR = path.resolve(process.env.UPLOAD_DIR || './uploads');
+const VIDEO_ID_RE = /^[a-zA-Z0-9_-]{11}$/;
+const ALLOWED_HOSTS = new Set(['www.youtube.com', 'youtube.com', 'm.youtube.com', 'music.youtube.com', 'youtu.be', 'www.youtu.be']);
 
-export interface YouTubeDownloadResult {
-  filename: string;
-  filepath: string;
-  title: string;
-  duration: number;
-}
+export type AudioQuality = 'fast' | 'balanced' | 'best';
 
-/**
- * Strictly validate YouTube URL using URL parser (not regex alone).
- * Prevents SSRF and command injection.
- */
-function validateYouTubeUrl(input: string): string {
+/** Extract the video id from any supported YouTube URL form; throws HttpError(400) otherwise. */
+export function extractVideoId(input: unknown): string {
+  if (typeof input !== 'string' || !input.trim()) throw new HttpError(400, 'A YouTube URL is required');
+  const raw = input.trim();
+  if (VIDEO_ID_RE.test(raw)) return raw;
+
   let url: URL;
   try {
-    url = new URL(input);
+    url = new URL(/^https?:\/\//i.test(raw) ? raw : `https://${raw}`);
   } catch {
-    throw new Error('Invalid URL format');
+    throw new HttpError(400, 'That does not look like a URL');
+  }
+  if (!['http:', 'https:'].includes(url.protocol) || !ALLOWED_HOSTS.has(url.hostname.toLowerCase())) {
+    throw new HttpError(400, 'Only youtube.com and youtu.be links are supported');
   }
 
-  // Must be HTTPS
-  if (url.protocol !== 'https:') {
-    throw new Error('Only HTTPS YouTube URLs are allowed');
-  }
-
-  // Validate hostname
-  const allowedHosts = ['www.youtube.com', 'youtube.com', 'youtu.be', 'm.youtube.com', 'music.youtube.com'];
-  if (!allowedHosts.includes(url.hostname)) {
-    throw new Error('URL must be from youtube.com or youtu.be');
-  }
-
-  // Validate path structure
-  if (url.hostname === 'youtu.be') {
-    // Short URL: must have /<videoId>
-    if (!/^\/[a-zA-Z0-9_-]{11}$/.test(url.pathname)) {
-      throw new Error('Invalid youtu.be video URL');
-    }
+  let id: string | null = null;
+  if (url.hostname.toLowerCase().endsWith('youtu.be')) {
+    id = url.pathname.split('/')[1] ?? null;
+  } else if (url.pathname === '/watch') {
+    id = url.searchParams.get('v');
   } else {
-    // Long URL: must be /watch or /shorts/<id>
-    if (url.pathname === '/watch') {
-      const v = url.searchParams.get('v');
-      if (!v || !/^[a-zA-Z0-9_-]{11}$/.test(v)) {
-        throw new Error('Invalid YouTube video ID');
-      }
-    } else if (url.pathname.startsWith('/shorts/')) {
-      const id = url.pathname.replace('/shorts/', '');
-      if (!/^[a-zA-Z0-9_-]{11}$/.test(id)) {
-        throw new Error('Invalid YouTube Shorts ID');
-      }
-    } else {
-      throw new Error('Unsupported YouTube URL format. Use /watch?v= or /shorts/ or youtu.be/');
-    }
+    const m = url.pathname.match(/^\/(?:shorts|embed|live|v)\/([^/?#]+)/);
+    id = m ? m[1] : null;
   }
-
-  // Return sanitized URL (strip any extra params that could be dangerous)
-  return url.toString();
+  if (!id || !VIDEO_ID_RE.test(id)) throw new HttpError(400, 'Could not find a video id in that YouTube link');
+  return id;
 }
 
-export async function downloadFromYouTube(rawUrl: string, quality: string = '192'): Promise<YouTubeDownloadResult> {
-  const url = validateYouTubeUrl(rawUrl);
+export function canonicalUrl(videoId: string): string {
+  return `https://www.youtube.com/watch?v=${videoId}`;
+}
 
-  const fileId = uuidv4();
-  const outputTemplate = path.join(UPLOAD_DIR, `${fileId}.%(ext)s`);
-  const expectedOutput = path.join(UPLOAD_DIR, `${fileId}.mp3`);
+interface YtInfo {
+  title?: string;
+  track?: string;
+  artist?: string;
+  creator?: string;
+  uploader?: string;
+  channel?: string;
+  duration?: number;
+  thumbnail?: string;
+  is_live?: boolean;
+}
 
-  return new Promise((resolve, reject) => {
-    // Get video info first (with safety flags)
-    const infoProc = spawn('yt-dlp', [
-      '--dump-json',
-      '--no-download',
-      '--no-exec',
-      '--no-playlist',
-      url,
-    ]);
+function toMetadata(info: YtInfo, videoId: string): JobMetadata {
+  const title = info.title || 'Unknown';
+  const guessed = parseArtistAndTrack(title, info.uploader || info.channel);
+  const artist = (info.artist || info.creator || guessed.artist || '').split(',')[0].trim() || undefined;
+  return {
+    title,
+    track: info.track || guessed.track,
+    artist,
+    duration: typeof info.duration === 'number' ? info.duration : undefined,
+    thumbnail: `https://i.ytimg.com/vi/${videoId}/hqdefault.jpg`,
+  };
+}
 
-    let infoJson = '';
-    let infoErr = '';
-    const MAX_INFO_SIZE = 1024 * 1024; // 1MB cap
+function ytDlpError(stderr: string, fallback: string): Error {
+  const text = stderr.toLowerCase();
+  if (text.includes('private video')) return new Error('This video is private');
+  if (text.includes('sign in to confirm your age')) return new Error('This video is age-restricted and cannot be downloaded');
+  if (text.includes('video unavailable')) return new Error('This video is unavailable');
+  if (text.includes('sign in to confirm')) return new Error('YouTube is asking for a sign-in (bot check). Try again later or upload the audio file instead');
+  return new Error(`${fallback}: ${tail(stderr) || 'unknown error'}`);
+}
 
-    infoProc.stdout.on('data', (data) => { if (infoJson.length < MAX_INFO_SIZE) infoJson += data.toString(); });
-    infoProc.stderr.on('data', (data) => { if (infoErr.length < 10000) infoErr += data.toString(); });
-
-    infoProc.on('error', (err) => {
-      reject(new Error(`yt-dlp not found. Install: pip install yt-dlp\n${err.message}`));
-    });
-
-    infoProc.on('close', (code) => {
-      if (code !== 0) {
-        return reject(new Error(`Failed to get video info: ${infoErr.trim().slice(0, 200) || `exit code ${code}`}`));
-      }
-
-      let title = 'Unknown';
-      let duration = 0;
-
-      try {
-        const info = JSON.parse(infoJson);
-        title = info.title || 'Unknown';
-        duration = info.duration || 0;
-
-        // Reject very long videos (>15min) to prevent abuse
-        if (duration > 900) {
-          return reject(new Error('Video too long (max 15 minutes). YouTube Shorts should be under 60 seconds.'));
-        }
-      } catch {
-        // Continue with defaults
-      }
-
-      // Download audio only as MP3 with dynamic format selection for speed
-      // Lower quality = pick smaller source format = faster download
-      const formatFilter = quality === '64' ? 'worstaudio'
-        : quality === '128' ? 'worstaudio*[abr<=128]/worstaudio'
-        : quality === '320' ? 'bestaudio'
-        : 'bestaudio*[abr<=192]/bestaudio'; // 192 default
-
-      const dlProc = spawn('yt-dlp', [
-        '-x',
-        '--audio-format', 'mp3',
-        '--audio-quality', quality === '320' ? '0' : quality === '192' ? '2' : quality === '128' ? '5' : '8',
-        '-f', formatFilter,
-        '--no-playlist',
-        '--no-exec',
-        '--max-filesize', '50M',
-        '-o', outputTemplate,
-        url,
-      ]);
-
-      let dlErr = '';
-      dlProc.stderr.on('data', (data) => { if (dlErr.length < 10000) dlErr += data.toString(); });
-
-      dlProc.on('error', (err) => {
-        reject(new Error(`yt-dlp not found. Install: pip install yt-dlp\n${err.message}`));
-      });
-
-      dlProc.on('close', (dlCode) => {
-        if (dlCode !== 0) {
-          return reject(new Error(`Download failed: ${dlErr.trim().slice(0, 200) || `exit code ${dlCode}`}`));
-        }
-
-        if (!fs.existsSync(expectedOutput)) {
-          const files = fs.readdirSync(UPLOAD_DIR).filter(f => f.startsWith(fileId));
-          if (files.length === 0) {
-            return reject(new Error('Download completed but output file not found'));
-          }
-          resolve({
-            filename: files[0],
-            filepath: path.join(UPLOAD_DIR, files[0]),
-            title,
-            duration,
-          });
-        } else {
-          resolve({
-            filename: `${fileId}.mp3`,
-            filepath: expectedOutput,
-            title,
-            duration,
-          });
-        }
-      });
-    });
+export async function getVideoInfo(videoId: string): Promise<JobMetadata> {
+  const result = await runProcess(
+    config.ytDlpPath,
+    ['--dump-json', '--skip-download', '--no-playlist', '--no-warnings', '--no-exec', canonicalUrl(videoId)],
+    { timeoutMs: 60_000, maxOutput: 4 * 1024 * 1024 },
+  ).catch((err) => {
+    throw err?.notFound ? new Error('yt-dlp is not installed on the server (pip install yt-dlp)') : err;
   });
+  if (result.code !== 0) throw ytDlpError(result.stderr, 'Could not read video info');
+
+  let info: YtInfo;
+  try {
+    info = JSON.parse(result.stdout) as YtInfo;
+  } catch {
+    throw new Error('Could not read video info (unexpected yt-dlp output)');
+  }
+  if (info.is_live) throw new Error('Live streams are not supported');
+  return toMetadata(info, videoId);
+}
+
+const QUALITY_ARGS: Record<AudioQuality, string> = { fast: '7', balanced: '4', best: '0' };
+
+export async function downloadAudio(
+  videoId: string,
+  quality: AudioQuality,
+  hooks: { onProgress?: (pct: number) => void; onSpawn?: (kill: () => void) => void } = {},
+): Promise<{ filepath: string; metadata: JobMetadata }> {
+  const metadata = await getVideoInfo(videoId);
+  if (metadata.duration && metadata.duration > config.maxMediaSeconds) {
+    throw new Error(`Video is too long (max ${Math.round(config.maxMediaSeconds / 60)} minutes)`);
+  }
+
+  const fileId = randomUUID();
+  const outputTemplate = path.join(config.uploadDir, `${fileId}.%(ext)s`);
+  const expected = path.join(config.uploadDir, `${fileId}.mp3`);
+
+  const result = await runProcess(
+    config.ytDlpPath,
+    [
+      '-f', 'bestaudio/best',
+      '-x', '--audio-format', 'mp3', '--audio-quality', QUALITY_ARGS[quality],
+      '--no-playlist', '--no-exec', '--no-warnings', '--newline',
+      '--max-filesize', `${Math.round(config.maxUploadBytes / (1024 * 1024)) * 2}M`,
+      ...(config.ffmpegPath !== 'ffmpeg' ? ['--ffmpeg-location', config.ffmpegPath] : []),
+      '-o', outputTemplate,
+      canonicalUrl(videoId),
+    ],
+    {
+      timeoutMs: 10 * 60_000,
+      onSpawn: hooks.onSpawn,
+      onStdout: (chunk) => {
+        const matches = [...chunk.matchAll(/\[download\]\s+(\d+(?:\.\d+)?)%/g)];
+        const last = matches.at(-1);
+        if (last) hooks.onProgress?.(Number(last[1]));
+      },
+    },
+  );
+
+  if (result.code !== 0) {
+    for (const f of fs.readdirSync(config.uploadDir).filter((f) => f.startsWith(fileId))) {
+      fs.rmSync(path.join(config.uploadDir, f), { force: true });
+    }
+    throw ytDlpError(result.stderr, 'Download failed');
+  }
+
+  if (fs.existsSync(expected)) return { filepath: expected, metadata };
+  const produced = fs.readdirSync(config.uploadDir).find((f) => f.startsWith(fileId) && !f.endsWith('.part'));
+  if (!produced) throw new Error('Download finished but no audio file was produced (is ffmpeg installed?)');
+  return { filepath: path.join(config.uploadDir, produced), metadata };
 }
